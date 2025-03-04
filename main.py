@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 from typing import Dict, List
 from astrbot.api.all import AstrMessageEvent, CommandResult, Context, Plain
 import astrbot.api.event.filter as filter
@@ -92,30 +92,44 @@ TIME_SCHEDULE = '''
 ▸ 温馨提示：晚归会被辅导员约谈哦 (＞﹏＜)
 '''
 
-@register("schedule", "作者名", "智能课程表插件", "2.0.0")
+@register("schedule", "作者名", "智能课程表插件", "2.1.1")
 class SchedulePlugin(Star):
     def __init__(self, context: Context) -> None:
         super().__init__(context)
         self.week_days = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
+        self.semester_start = datetime(2023, 9, 4)  # 学期开始日期
 
     def _get_day(self, text: str) -> int:
-        """智能解析日期"""
-        text = text.replace("/课表", "").strip()
+        """智能解析日期（修复凌晨判断）"""
+        now = datetime.now()
+        # 凌晨5点前视为前一天
+        if now.time() < time(5, 0):
+            now = now - timedelta(days=1)
+            logger.debug(f"凌晨时间修正为：{now.strftime('%Y-%m-%d %H:%M')}")
+
+        clean_text = text.replace("/课表", "").strip().lower()
         day_map = {
-            "今天": datetime.now().isoweekday(),
-            "明天": (datetime.now().isoweekday() % 7) + 1,
+            "今天": now.isoweekday(),
+            "明天": (now.isoweekday() % 7) + 1,
             "周一":1, "周二":2, "周三":3, "周四":4, "周五":5,
-            "周1":1, "周2":2, "周3":3, "周4":4, "周5":5
+            "周1":1, "周2":2, "周3":3, "周4":4, "周5":5,
+            "一":1, "二":2, "三":3, "四":4, "五":5
         }
-        return day_map.get(text, datetime.now().isoweekday())
+        return day_map.get(clean_text, now.isoweekday())
+
+    def _current_week(self) -> int:
+        """计算当前教学周"""
+        delta = datetime.now() - self.semester_start
+        return (delta.days // 7) + 1
 
     def _format_note(self, course: Dict) -> str:
         """生成课程备注"""
+        notes = []
         if "note" in course:
-            return f"\n📌 注意：{course['note']}"
-        if "（双）" in course["weeks"]:
-            return "\n🚩 特别提醒：本课程双周才上哦！"
-        return ""
+            notes.append(f"📌 {course['note']}")
+        if "（双）" in course["weeks"] and self._current_week() % 2 == 0:
+            notes.append("🚩 本周是双周，本课程正常进行！")
+        return "\n".join(notes)
 
     def _format_course(self, courses: List[Dict]) -> str:
         """生成带样式的课程信息"""
@@ -124,7 +138,7 @@ class SchedulePlugin(Star):
             f"├👨🏫 教师：{course['teacher']}\n"
             f"├🏫 教室：{course['classroom']}\n"
             f"├⏰ 时间：{course['time']}\n"
-            f"└📆 周次：{course['weeks']}"
+            f"└📆 周次：{course['weeks']}\n"
             f"{self._format_note(course)}"
             for course in courses
         ])
@@ -144,21 +158,21 @@ class SchedulePlugin(Star):
 
     @filter.command("课表")
     async def query_schedule(self, event: AstrMessageEvent):
-        '''查询课表：/课表 [今天/明天/周一] (默认今天)'''
+        '''查询课表：/课表 [今天/明天/周一]'''
         try:
             args = event.message_str.split(maxsplit=1)
-            query_day = args if len(args)>1 else "今天"
-            day = self._get_day(query_day)
+            query_day = args if len(args) > 1 else "今天"
             
-            if day > 5:
-                yield CommandResult().message("🎉 周末没有课程！快去享受生活吧～")
+            day = self._get_day(query_day)
+            logger.info(f"请求星期数: {day} ({self.week_days[day-1]})")
+
+            if not 1 <= day <= 5:
+                yield CommandResult().message("🎉 非教学日没有课程安排！")
                 return
 
             response = await self._get_day_schedule(day)
             yield CommandResult().message(response)
 
-        except IndexError:
-            yield CommandResult().error("❌ 参数格式错误！使用示例：/课表 周三")
         except Exception as e:
             logger.error(f"课表查询异常: {str(e)}", exc_info=True)
             yield CommandResult().error("💥 课程表服务暂时不可用")
@@ -167,23 +181,20 @@ class SchedulePlugin(Star):
     async def weekly_schedule(self, event: AstrMessageEvent):
         '''查看本周完整课表'''
         try:
-            msg = ["📚 本周课程总览 🌈", "━"*30]
+            msg = [
+                "📚 本周课程总览 🌈", 
+                f"🗓️ 当前第 {self._current_week()} 教学周",
+                "━" * 30
+            ]
             
-            # 添加日期范围说明
-            monday = datetime.now() - timedelta(days=datetime.now().weekday())
-            date_range = f"{monday.month}月{monday.day}日 - {(monday + timedelta(days=4)).month}月{(monday + timedelta(days=4)).day}日"
-            msg.insert(1, f"🗓️ 本周日期：{date_range}\n")
-            
-            # 添加每日课程卡片
+            # 生成每日课程
             for day in range(1,6):
                 day_msg = await self._get_day_schedule(day)
                 msg.append(day_msg)
-                msg.append("━"*30 + "\n")
+                msg.append("━" * 30)
             
-            # 添加周次提醒
-            current_week = datetime.now().isocalendar() - 34  # 假设学期从第34周开始
-            msg.append(f"📅 当前是第 {current_week} 教学周（更新于{datetime.now().strftime('%m/%d %H:%M')}）")
-            
+            # 添加更新时间
+            msg.append(f"⏳ 更新时间：{datetime.now().strftime('%m/%d %H:%M')}")
             yield CommandResult().message("\n".join(msg))
 
         except Exception as e:
