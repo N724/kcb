@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List
 from astrbot.api.all import AstrMessageEvent, CommandResult, Context, Plain
 import astrbot.api.event.filter as filter
@@ -64,7 +64,7 @@ SCHEDULE_DATA = {
     ]
 }
 
-# 作息时间表（带颜文字）
+# 作息时间表
 TIME_SCHEDULE = '''
 🌸 元气满满の作息表 🌸
 🍳 上午课程 | 1-4节
@@ -100,11 +100,14 @@ class SchedulePlugin(Star):
 
     def _get_day(self, text: str) -> int:
         """智能解析日期"""
-        text = text.replace("星期", "").replace("周", "").strip()
-        day_map = {"一":1, "二":2, "三":3, "四":4, "五":5, 
-                  "今天": datetime.today().isoweekday(),
-                  "明天": (datetime.today().isoweekday() % 7) +1}
-        return day_map.get(text, datetime.today().isoweekday())
+        text = text.replace("/课表", "").strip()
+        day_map = {
+            "今天": datetime.now().isoweekday(),
+            "明天": (datetime.now().isoweekday() % 7) + 1,
+            "周一":1, "周二":2, "周三":3, "周四":4, "周五":5,
+            "周1":1, "周2":2, "周3":3, "周4":4, "周5":5
+        }
+        return day_map.get(text, datetime.now().isoweekday())
 
     def _format_note(self, course: Dict) -> str:
         """生成课程备注"""
@@ -143,8 +146,9 @@ class SchedulePlugin(Star):
     async def query_schedule(self, event: AstrMessageEvent):
         '''查询课表：/课表 [今天/明天/周一] (默认今天)'''
         try:
-            args = event.message_str.split()
-            day = self._get_day(args if len(args)>1 else "")
+            args = event.message_str.split(maxsplit=1)
+            query_day = args if len(args)>1 else "今天"
+            day = self._get_day(query_day)
             
             if day > 5:
                 yield CommandResult().message("🎉 周末没有课程！快去享受生活吧～")
@@ -153,6 +157,8 @@ class SchedulePlugin(Star):
             response = await self._get_day_schedule(day)
             yield CommandResult().message(response)
 
+        except IndexError:
+            yield CommandResult().error("❌ 参数格式错误！使用示例：/课表 周三")
         except Exception as e:
             logger.error(f"课表查询异常: {str(e)}", exc_info=True)
             yield CommandResult().error("💥 课程表服务暂时不可用")
@@ -162,11 +168,22 @@ class SchedulePlugin(Star):
         '''查看本周完整课表'''
         try:
             msg = ["📚 本周课程总览 🌈", "━"*30]
+            
+            # 添加日期范围说明
+            monday = datetime.now() - timedelta(days=datetime.now().weekday())
+            date_range = f"{monday.month}月{monday.day}日 - {(monday + timedelta(days=4)).month}月{(monday + timedelta(days=4)).day}日"
+            msg.insert(1, f"🗓️ 本周日期：{date_range}\n")
+            
+            # 添加每日课程卡片
             for day in range(1,6):
                 day_msg = await self._get_day_schedule(day)
-                msg.append(day_msg + "\n" + "━"*30)
+                msg.append(day_msg)
+                msg.append("━"*30 + "\n")
             
-            msg.append("💡 温馨提示：双击课程可查看详细信息")
+            # 添加周次提醒
+            current_week = datetime.now().isocalendar() - 34  # 假设学期从第34周开始
+            msg.append(f"📅 当前是第 {current_week} 教学周（更新于{datetime.now().strftime('%m/%d %H:%M')}）")
+            
             yield CommandResult().message("\n".join(msg))
 
         except Exception as e:
