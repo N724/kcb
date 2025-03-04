@@ -1,1 +1,6 @@
-
+name: astrbot_plugin_schedule
+desc: 智能课程表插件
+help: 发送「/课表 [星期]」查询课程安排
+version: 1.1.0
+author: nbx
+repo: https://github.com/N724/kcb
