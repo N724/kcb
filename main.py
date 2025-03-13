@@ -64,35 +64,58 @@ class SmartCampusPlugin(Star):
         )
 
     @filter.command("课程查询")
-    async def handle_query(self, event: AstrMessageEvent):
-        '''优化后的命令处理'''
+async def handle_query(self, context: Context, event: AstrMessageEvent, args: List[str]):
+    '''查询课程信息，格式：/课程查询 [模式] [周次] [星期]'''
+    try:
+        # 调试日志验证参数
+        logger.debug(f"收到请求: 上下文类型={type(context).__name__} 事件类型={type(event).__name__} 参数={args}")
+        
+        params = {}
+        current_args = args.copy()
+        
+        # 参数解析逻辑
+        if current_args:
+            # 处理模式参数
+            if current_args[0].lower() in ('today', 'week', 'all'):
+                params['mode'] = current_args[0].lower()
+                current_args.pop(0)
+            
+            # 处理周次参数
+            if current_args and current_args[0].isdigit():
+                week = max(1, min(18, int(current_args[0])))
+                params['week'] = str(week)
+                current_args.pop(0)
+            
+            # 处理星期参数
+            if current_args and current_args[0].isdigit():
+                day = max(1, min(7, int(current_args[0])))
+                params['day'] = str(day)
+                current_args.pop(0)
+        
+        # 发送查询提示
+        yield CommandResult().message("🔍 正在查询校园数据...")
+
+        # 获取API数据
+        raw_data = await self._fetch_data(params)
+        if not raw_data:
+            yield CommandResult().error("⚠️ 数据服务暂时不可用")
+            return
+
+        # 处理原始数据
+        if raw_data.startswith('⚠️'):
+            yield CommandResult().error(raw_data)
+            return
+
+        # 格式化响应
         try:
-            # ... 参数处理部分保持原有代码 ...
+            formatted = self._format_response(raw_data)
+        except Exception as format_error:
+            logger.error(f"格式化失败: {str(format_error)}\n原始数据:{raw_data}")
+            yield CommandResult().error("⚠️ 数据解析异常，请稍后重试")
+            return
             
-            # 获取原始数据
-            raw_data = await self._fetch_data(params)
-            if not raw_data:
-                yield CommandResult().error("⚠️ 数据服务暂时不可用")
-                return
+        yield CommandResult().message(formatted)
 
-            # 新增调试日志
-            logger.debug(f"原始响应数据:\n{raw_data}")
-            
-            # 处理API返回的错误信息
-            if raw_data.startswith('⚠️'):
-                yield CommandResult().error(raw_data)
-                return
-
-            # 格式化处理
-            try:
-                formatted = self._format_response(raw_data)
-            except Exception as format_error:
-                logger.error(f"格式化失败: {str(format_error)}")
-                yield CommandResult().error("⚠️ 数据解析异常，请稍后重试")
-                return
-                
-            yield CommandResult().message(formatted)
-
-        except Exception as e:
-            logger.error(f"全局异常: {str(e)}", exc_info=True)
-            yield CommandResult().error("💥 服务暂时不可用，请稍后再试")
+    except Exception as e:
+        logger.error(f"全局异常: {str(e)}", exc_info=True)
+        yield CommandResult().error("💥 服务暂时不可用，请稍后再试")
