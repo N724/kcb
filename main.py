@@ -1,4 +1,5 @@
 import aiohttp
+import re
 import logging
 from typing import Optional, Dict, List
 from astrbot.api.all import AstrMessageEvent, CommandResult, Context, Plain
@@ -7,115 +8,133 @@ from astrbot.api.star import register, Star
 
 logger = logging.getLogger("astrbot")
 
-@register("netcourse", "作者名", "网课任务查询插件", "1.0.0")
-class NetCoursePlugin(Star):
+@register("smartcampus", "作者名", "智能校园课程与天气查询插件", "1.0.0")
+class SmartCampusPlugin(Star):
     def __init__(self, context: Context) -> None:
         super().__init__(context)
-        self.api_url = "http://hanlin.icu/api.php?act=chadan"
-        self.quote_url = "https://api.qqsuu.cn/api/dm-mgjuzi"
+        self.api_url = "http://kcb.wzhy99.top/"
         self.timeout = aiohttp.ClientTimeout(total=15)
-
-    async def fetch_netcourse(self, username: str) -> Optional[Dict[str, str]]:
-        """获取网课任务数据"""
+        
+    async def fetch_schedule(self, params: Dict[str, str]) -> Optional[str]:
+        """获取课程数据"""
         try:
-            data = {"username": username}
             headers = {
-                "Content-Type": "application/x-www-form-urlencoded",
-                "User-Agent": "Mozilla/5.0 (Compatible; Bot/2.0)"
+                "User-Agent": "Mozilla/5.0 (Compatible; Bot/2.0)",
+                "Accept-Charset": "UTF-8"
             }
-            logger.debug(f"请求参数：{data}")
-
+            
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                async with session.post(self.api_url, data=data, headers=headers) as resp:
-                    if resp.status != 200:
-                        logger.error(f"API请求失败 HTTP {resp.status}")
-                        return None
-
-                    result = await resp.json()
-                    logger.debug(f"API原始响应:\n{result}")
-                    return result
-
+                async with session.get(self.api_url, params=params, headers=headers) as resp:
+                    if resp.status in (200, 503):
+                        return await resp.text(encoding='UTF-8')
+                    elif resp.status == 400:
+                        return f"⚠️ {await resp.text()}"
+                    logger.error(f"API异常状态码: {resp.status}")
+                    return None
         except aiohttp.ClientError as e:
-            logger.error(f"网络请求异常: {str(e)}")
+            logger.error(f"网络请求失败: {str(e)}")
             return None
         except Exception as e:
-            logger.error(f"未知异常: {str(e)}", exc_info=True)
+            logger.error(f"未知错误: {str(e)}", exc_info=True)
             return None
 
-    async def fetch_quote(self) -> str:
-        """获取励志名言"""
-        try:
-            async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                async with session.get(self.quote_url) as resp:
-                    if resp.status != 200:
-                        return "🌟 今天也要加油哦，未来的你会感谢现在努力的自己！"
+    def _parse_response(self, text: str) -> str:
+        """解析API响应并格式化"""
+        # 移除时间戳
+        cleaned_text = re.sub(r'$$\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$$\n', '', text)
+        
+        # 分割课程和天气模块
+        parts = cleaned_text.split('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n')
+        if len(parts) < 3:
+            return "⚠️ 数据解析异常，请稍后再试"
+            
+        course_section = parts[1].strip()
+        weather_section = parts[2].strip()
+        
+        # 优化课程显示
+        course_lines = []
+        for line in course_section.split('\n'):
+            if line.startswith('🔸'):
+                course_lines.append(f"\n📌 {line[2:]}")
+            elif line.startswith('├'):
+                course_lines.append(f"├─📖 {line[2:]}")
+            elif line.startswith('│'):
+                course_lines.append(f"│  {line[1:]}")
+            elif line.startswith('└'):
+                course_lines.append(f"└─⏰ {line[2:]}")
+            else:
+                course_lines.append(line)
+        
+        # 优化天气显示
+        weather_lines = []
+        for line in weather_section.split('\n'):
+            if line.startswith('📍'):
+                weather_lines.append(f"🌍 {line[2:]}")
+            elif line.startswith('⚠️'):
+                weather_lines.append(f"⚠️ **预警**：{line[3:]}")
+            else:
+                weather_lines.append(line.replace(' | ', ' | '))
+        
+        return (
+            "📚 **课程信息**\n" + '\n'.join(course_lines) +
+            "\n\n🌤️ **天气信息**\n" + '\n'.join(weather_lines) +
+            "\n\n🔍 数据更新周期：每10分钟 | 教学周自动校准"
+        )
 
-                    result = await resp.json()
-                    if result.get("code") == 200:
-                        content = result["data"].get("content", "坚持不懈的努力，才有精彩的明天！")
-                        author = result["data"].get("author", "佚名")
-                        return f"🌟 『{content}』 —— {author}"
-                    return "🌟 今天也要加油哦，未来的你会感谢现在努力的自己！"
-
-        except Exception as e:
-            logger.error(f"获取名言失败: {str(e)}")
-            return "🌟 今天也要加油哦，未来的你会感谢现在努力的自己！"
-
-    def _format_message(self, data: Dict[str, str], quote: str) -> str:
-        """生成格式化消息"""
-        tasks = data.get("data", [])
-        task_count = len(tasks)
-        if task_count == 0:
-            return "📭 没有找到该用户的任何网课任务记录！"
-
-        task_details = f"🎉 查询到该用户共有 {task_count} 条网课任务记录：\n"
-        for i, task in enumerate(tasks, start=1):
-            ptname = task.get("ptname", "未知项目")
-            name = task.get("name", "未知用户")
-            status = task.get("status", "状态未知")
-            progress = task.get("process", "0.0%")
-            remarks = task.get("remarks", "无备注信息")
-            addtime = task.get("addtime", "未知时间")
-
-            task_details += (
-                f"\n📘 **任务 {i}**\n"
-                f"👤 用户名：{name}\n"
-                f"📚 项目名称：{ptname}\n"
-                f"📊 当前状态：{status}\n"
-                f"📈 完成进度：{progress}\n"
-                f"📅 添加时间：{addtime}\n"
-                f"📝 备注信息：{remarks}\n"
-            )
-            task_details += "-----------------------\n"
-
-        task_details += f"\n{quote}\n"
-        task_details += "\n🌈 再难的任务也要坚持完成，聂半仙网课小助手和你一起努力！💪"
-        return task_details
-
-    @filter.command("网课查询")
-    async def netcourse_query(self, event: AstrMessageEvent):
-        '''查询网课任务，格式：/网课查询 [手机号/学号]'''
+    @filter.command("课程查询")
+    async def query_schedule(self, event: AstrMessageEvent):
+        '''查询课程及天气，支持参数：/课程查询 [mode=今天/week/all] [day=1-7] [week=1-18]'''
         try:
             args = event.message_str.split()
-            if len(args) < 2:
-                yield CommandResult().error("😅 请输入手机号或学号进行查询：")
+            params = {}
+            
+            # 参数解析
+            for arg in args[1:]:
+                if '=' in arg:
+                    k, v = arg.split('=', 1)
+                    params[k.strip()] = v.strip()
+            
+            # 参数验证
+            valid_params = {}
+            if 'mode' in params:
+                if params['mode'] in ('today', 'week', 'all'):
+                    valid_params['mode'] = params['mode']
+                else:
+                    yield CommandResult().error("⚠️ 模式参数错误，可选值：today/week/all")
+                    return
+                    
+            if 'day' in params:
+                try:
+                    day = max(1, min(7, int(params['day'])))
+                    valid_params['day'] = str(day)
+                except ValueError:
+                    yield CommandResult().error("⚠️ 星期参数应为1-7的整数")
+                    return
+                    
+            if 'week' in params:
+                try:
+                    week = max(1, min(18, int(params['week'])))
+                    valid_params['week'] = str(week)
+                except ValueError:
+                    yield CommandResult().error("⚠️ 周次参数应为1-18的整数")
+                    return
+            
+            yield CommandResult().message("🔍 正在查询校园数据...")
+            
+            # 获取数据
+            response = await self.fetch_schedule(valid_params)
+            if not response:
+                yield CommandResult().error("⚠️ 数据服务暂时不可用")
                 return
-
-            query = ' '.join(args[1:])
-            if not query.strip().isdigit():
-                yield CommandResult().error("📵 输入内容错误，请确保输入仅包含数字！")
+                
+            if response.startswith('⚠️'):
+                yield CommandResult().error(response)
                 return
-
-            yield CommandResult().message("📡 正在查询该用户的所有网课任务数据，请稍候...✨")
-
-            data = await self.fetch_netcourse(query)
-            if not data or data.get("code") != 1 or not data.get("data"):
-                yield CommandResult().error("🚫 查询不到相关数据，请检查输入是否正确，或稍后再试～")
-                return
-
-            quote = await self.fetch_quote()
-            yield CommandResult().message(self._format_message(data, quote))
-
+                
+            # 格式化输出
+            formatted = self._parse_response(response)
+            yield CommandResult().message(formatted)
+            
         except Exception as e:
-            logger.error(f"处理指令异常: {str(e)}", exc_info=True)
-            yield CommandResult().error("💥 网课查询服务暂时不可用")
+            logger.error(f"指令处理异常: {str(e)}", exc_info=True)
+            yield CommandResult().error("💥 服务繁忙，请稍后再试")
