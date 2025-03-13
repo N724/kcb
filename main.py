@@ -1,5 +1,4 @@
 import aiohttp
-import re
 import logging
 from typing import Optional, Dict, List
 from astrbot.api.all import AstrMessageEvent, CommandResult, Context, Plain
@@ -12,25 +11,23 @@ logger = logging.getLogger("astrbot")
 class SmartCampusPlugin(Star):
     def __init__(self, context: Context) -> None:
         super().__init__(context)
-        self.api_url = "http://kcb.wzhy99.top/"
+        self.base_url = "http://kcb.wzhy99.top/"
         self.timeout = aiohttp.ClientTimeout(total=15)
-        
-    async def fetch_schedule(self, params: Dict[str, str]) -> Optional[str]:
-        """获取课程数据"""
+
+    async def _fetch_data(self, params: Dict[str, str]) -> Optional[str]:
+        """执行API请求"""
         try:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Compatible; Bot/2.0)",
-                "Accept-Charset": "UTF-8"
+                "Accept": "text/plain; charset=utf-8"
             }
-            
+
             async with aiohttp.ClientSession(timeout=self.timeout) as session:
-                async with session.get(self.api_url, params=params, headers=headers) as resp:
-                    if resp.status in (200, 503):
-                        return await resp.text(encoding='UTF-8')
-                    elif resp.status == 400:
-                        return f"⚠️ {await resp.text()}"
-                    logger.error(f"API异常状态码: {resp.status}")
-                    return None
+                async with session.get(self.base_url, params=params, headers=headers) as resp:
+                    if resp.status != 200:
+                        logger.error(f"API异常状态码: {resp.status}")
+                        return None
+                    return await resp.text(encoding='utf-8')
         except aiohttp.ClientError as e:
             logger.error(f"网络请求失败: {str(e)}")
             return None
@@ -38,103 +35,75 @@ class SmartCampusPlugin(Star):
             logger.error(f"未知错误: {str(e)}", exc_info=True)
             return None
 
-    def _parse_response(self, text: str) -> str:
-        """解析API响应并格式化"""
+    def _format_response(self, raw_data: str) -> str:
+        """格式化原始响应数据"""
         # 移除时间戳
-        cleaned_text = re.sub(r'$$\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$$\n', '', text)
+        cleaned_data = raw_data.split('\n', 1)[-1]
         
-        # 分割课程和天气模块
-        parts = cleaned_text.split('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n')
-        if len(parts) < 3:
-            return "⚠️ 数据解析异常，请稍后再试"
-            
-        course_section = parts[1].strip()
-        weather_section = parts[2].strip()
+        # 分割课程和天气信息
+        sections = cleaned_data.split('\n' + '━'*60 + '\n')
+        if len(sections) < 2:
+            return "⚠️ 数据格式异常，请联系管理员"
         
-        # 优化课程显示
-        course_lines = []
-        for line in course_section.split('\n'):
-            if line.startswith('🔸'):
-                course_lines.append(f"\n📌 {line[2:]}")
-            elif line.startswith('├'):
-                course_lines.append(f"├─📖 {line[2:]}")
-            elif line.startswith('│'):
-                course_lines.append(f"│  {line[1:]}")
-            elif line.startswith('└'):
-                course_lines.append(f"└─⏰ {line[2:]}")
-            else:
-                course_lines.append(line)
+        # 课程信息处理
+        course_info = sections[0].replace('━━', '┈┈').replace('├', '│').replace('└', '╰')
         
-        # 优化天气显示
-        weather_lines = []
-        for line in weather_section.split('\n'):
-            if line.startswith('📍'):
-                weather_lines.append(f"🌍 {line[2:]}")
-            elif line.startswith('⚠️'):
-                weather_lines.append(f"⚠️ **预警**：{line[3:]}")
-            else:
-                weather_lines.append(line.replace(' | ', ' | '))
+        # 天气信息处理
+        weather_info = sections[1].replace(' | ', ' ｜ ').replace('━━', '┈┈')
         
-        return (
-            "📚 **课程信息**\n" + '\n'.join(course_lines) +
-            "\n\n🌤️ **天气信息**\n" + '\n'.join(weather_lines) +
-            "\n\n🔍 数据更新周期：每10分钟 | 教学周自动校准"
-        )
+        return f"""
+📚 课程信息
+{course_info}
+
+🌤️ 实时天气
+{weather_info}
+        """.strip()
 
     @filter.command("课程查询")
-    async def query_schedule(self, event: AstrMessageEvent):
-        '''查询课程及天气，支持参数：/课程查询 [mode=今天/week/all] [day=1-7] [week=1-18]'''
+    async def handle_query(self, event: AstrMessageEvent):
+        '''查询课程信息，格式：/课程查询 [模式] [周次] [星期]
+        
+        参数说明：
+        - 模式：today/week/all（默认today）
+        - 周次：1-18的数字（默认当前周）
+        - 星期：1-7的数字（当模式为today时无效）
+        '''
         try:
-            args = event.message_str.split()
-            params = {}
+            args = event.message_str.split()[1:]  # 去除命令头
             
             # 参数解析
-            for arg in args[1:]:
-                if '=' in arg:
-                    k, v = arg.split('=', 1)
-                    params[k.strip()] = v.strip()
+            params = {}
+            if len(args) > 0 and args[0] in ('today', 'week', 'all'):
+                params['mode'] = args[0]
+                args = args[1:]
             
-            # 参数验证
-            valid_params = {}
-            if 'mode' in params:
-                if params['mode'] in ('today', 'week', 'all'):
-                    valid_params['mode'] = params['mode']
-                else:
-                    yield CommandResult().error("⚠️ 模式参数错误，可选值：today/week/all")
-                    return
-                    
-            if 'day' in params:
-                try:
-                    day = max(1, min(7, int(params['day'])))
-                    valid_params['day'] = str(day)
-                except ValueError:
-                    yield CommandResult().error("⚠️ 星期参数应为1-7的整数")
-                    return
-                    
-            if 'week' in params:
-                try:
-                    week = max(1, min(18, int(params['week'])))
-                    valid_params['week'] = str(week)
-                except ValueError:
-                    yield CommandResult().error("⚠️ 周次参数应为1-18的整数")
-                    return
+            if len(args) > 0 and args[0].isdigit():
+                week = max(1, min(18, int(args[0])))
+                params['week'] = str(week)
+                args = args[1:]
             
+            if len(args) > 0 and args[0].isdigit():
+                day = max(1, min(7, int(args[0])))
+                params['day'] = str(day)
+            
+            # 发送查询提示
             yield CommandResult().message("🔍 正在查询校园数据...")
-            
+
             # 获取数据
-            response = await self.fetch_schedule(valid_params)
-            if not response:
+            raw_data = await self._fetch_data(params)
+            if not raw_data:
                 yield CommandResult().error("⚠️ 数据服务暂时不可用")
                 return
-                
-            if response.startswith('⚠️'):
-                yield CommandResult().error(response)
+
+            # 处理错误提示
+            if raw_data.startswith('⚠️'):
+                yield CommandResult().error(raw_data)
                 return
-                
-            # 格式化输出
-            formatted = self._parse_response(response)
+
+            # 格式化结果
+            formatted = self._format_response(raw_data)
             yield CommandResult().message(formatted)
-            
+
         except Exception as e:
             logger.error(f"指令处理异常: {str(e)}", exc_info=True)
-            yield CommandResult().error("💥 服务繁忙，请稍后再试")
+            yield CommandResult().error("💥 服务暂时不可用，请稍后再试")
